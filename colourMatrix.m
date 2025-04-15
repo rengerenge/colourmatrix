@@ -123,7 +123,7 @@ I = cat(3, medfilt2(I(:,:,1), hsize_2), medfilt2(I(:,:,2), hsize_2), medfilt2(I(
 if showProcess
     subplot(3, 4, 5);
     imshow(I);
-    title('透视矫正+高斯&中值滤波');
+    title('透视矫正+中值滤波');
 end
 
 I_crop = I;
@@ -166,8 +166,8 @@ end
 
 x = inputPoints(1).BoundingBox(1) + inputPoints(1).BoundingBox(3)*CropOffset;
 y = inputPoints(1).BoundingBox(2) + inputPoints(1).BoundingBox(4)*CropOffset;
-width = inputPoints(3).BoundingBox(1) - inputPoints(1).BoundingBox(3)*CropOffset - x;
-height = inputPoints(3).BoundingBox(2) - inputPoints(2).BoundingBox(4)*CropOffset - y;
+width = inputPoints(3).BoundingBox(1) - inputPoints(3).BoundingBox(3)*(CropOffset-1) - x;
+height = inputPoints(3).BoundingBox(2) - inputPoints(3).BoundingBox(4)*(CropOffset-1) - y;
 
 I_crop = imcrop(I_crop, [x,y,width,height]);
 
@@ -177,17 +177,19 @@ if showProcess
 end
 
 %% STEP 5: 获取彩色连通区域 对4×4方格排序
+I_crop = cat(3, medfilt2(I_crop(:,:,1), hsize_2), medfilt2(I_crop(:,:,2), hsize_2), medfilt2(I_crop(:,:,3), hsize_2));
 I_crop = imgaussfilt(I_crop, sigma);
 
 if showProcess
     subplot(3, 4, 8);
     imshow(I_crop);
-    title('高斯滤波');
+    title('中值&高斯滤波');
 end
 
 I_gray = rgb2gray(I_crop);
 I_gray_adjusted = imadjust(I_gray);
 bw = imbinarize(I_gray_adjusted, 'adaptive', 'Sensitivity', 0.75);
+% bw = imbinarize(I_gray_adjusted); %不能用，某些深色色块会被归类到黑色
 bw = bwareaopen(bw, 30);
 
 if showProcess
@@ -200,9 +202,9 @@ end
 SE = strel('square', 6); 
 dilatedI = imdilate(imcomplement(bw), SE);
 
-SE = zeros(7, 7);
-SE(4, :) = 1;  % 水平方向
-SE(:, 4) = 1;  % 垂直方向
+SE = zeros(11, 11);
+SE(6, :) = 1;  % 水平方向
+SE(:, 6) = 1;  % 垂直方向
 dilatedI = imdilate(dilatedI, SE);
 dilatedI = imcomplement(dilatedI);
 
@@ -214,19 +216,34 @@ if showProcess
 end
 
 color_stats = regionprops(dilatedI, 'Centroid', 'Area', 'Circularity');
+color_stats = color_stats([color_stats.Area] > 8);
 
 while length(color_stats) > 16
-    % 提取所有面积并计算合适的阈值
-    allAreas = [color_stats.Area];
-    maxArea = max(allAreas);
-    areaThreshold = maxArea;  % 调整阈值以适应实际情况
-
-    % 只保留面积较小的区域（小方格）
-    validIndices = [color_stats.Area] < areaThreshold & [color_stats.Area] > 8;
-    color_stats = color_stats(validIndices);
+    median_value = median([color_stats.Area]);
+    maxArea = max([color_stats.Area]);
+    minArea = min([color_stats.Area]);
+    if maxArea > median_value * 10
+        color_stats = color_stats([color_stats.Area] ~= maxArea);
+    elseif minArea < median_value / 2
+        color_stats = color_stats([color_stats.Area] ~= minArea);
+    else
+        break
+    end
 end
 
 final_stats = color_stats;
+% 绘制质心
+for k = 1:length(final_stats)
+    centroid = final_stats(k).Centroid;
+    if showProcess
+        plot(centroid(1), centroid(2), 'r+', 'MarkerSize', 6);
+    end
+end
+
+if showProcess
+    hold off;
+end
+
 % 提取所有质心坐标
 centroids = cat(1, final_stats.Centroid);  % N×2矩阵，[x1,y1; x2,y2; ...]
 [~, yOrder] = sort(centroids(:, 2));  % 按Y升序
@@ -247,18 +264,6 @@ for row = 1:ROW
     % 将排序后的行加入结果
     sorted_stats(startIdx : endIdx) = sortedRow';
     % sorted_stats = [sorted_stats; sortedRow];
-end
-
-% 绘制质心
-for k = 1:length(sorted_stats)
-    centroid = sorted_stats(k).Centroid;
-    if showProcess
-        plot(centroid(1), centroid(2), 'r+', 'MarkerSize', 6);
-    end
-end
-
-if showProcess
-    hold off;
 end
 
 %% STEP 6: 统计颜色
