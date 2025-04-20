@@ -1,16 +1,16 @@
 function resultMatrix = colourMatrix(file, showProcess)
-%% process_grid.m
+%% Settings
 % 读取图像、去噪、检测黑色圆点、透视校正、分割4×4方格、统计颜色
 % clc; close all;
 ROW = 4;
 COL = 4;
+sigma = 1.5;
 
 % 在实拍图像中，腐蚀矩阵需要设置得大一点 推荐6
 ErosionPix = 4;
 CropOffset = 2.5;
 
-%% STEP 1: 读取图像并预处理
-% 请确保图片文件名正确
+%% Load File
 IMG = imread(file);
 [height, width, ~] = size(IMG);
 if height > 1000 || width > 1000
@@ -25,13 +25,8 @@ if showProcess
     title('原图像');
 end
 
+%% 去除噪点
 I = IMG;
-% 创建高斯滤波器
-% hsize = [10 10];
-sigma = 1.5;
-% 对图像进行高斯滤波
-% I = imgaussfilt(I, sigma);
-
 % 对RGB每个通道进行中值滤波去除噪点
 hsize_2 = [6 6];
 I = cat(3, medfilt2(I(:,:,1), hsize_2), medfilt2(I(:,:,2), hsize_2), medfilt2(I(:,:,3), hsize_2));
@@ -44,6 +39,7 @@ if showProcess
     title('中值滤波');
 end
 
+%% 二值化
 % 转换为灰度图，并增强对比度以便后续二值化
 I_gray = rgb2gray(IMG);
 I_gray_adjusted = imadjust(I_gray);
@@ -51,6 +47,7 @@ I_gray_adjusted = imadjust(I_gray);
 % 二值化（采用自适应阈值，Sensitivity可以根据实际图像调节）
 bw = imbinarize(I_gray_adjusted);
 
+%% 腐蚀
 % se = strel('square', 3);
 % bw = imopen(bw, se);
 bw = bwareaopen(bw, 30);
@@ -72,8 +69,7 @@ if showProcess
     title('二值化+腐蚀');
 end
 
-%% STEP 2: 检测黑色圆点
-% 显示原图 + 边界 + 质心
+%% 检测黑色圆点
 if showProcess
     subplot(3, 4, 4);
     imshow(erodedI);
@@ -92,7 +88,7 @@ if showProcess
     hold off;
 end
 
-%% STEP 4: 透视校正裁剪
+%% 透视校正裁剪
 % 根据角点计算输出正视图的宽和高
 pTL = inputPoints(1).Centroid; 
 pTR = inputPoints(2).Centroid; 
@@ -119,13 +115,13 @@ tform = fitgeotrans([pTL; pTR; pBR; pBL], outputPoints, 'projective');
 % 对预处理后的图像进行透视变换
 I = imwarp(IMG, tform, 'OutputView', imref2d([outputHeight, outputWidth]));
 I = cat(3, medfilt2(I(:,:,1), hsize_2), medfilt2(I(:,:,2), hsize_2), medfilt2(I(:,:,3), hsize_2));
-
 if showProcess
     subplot(3, 4, 5);
     imshow(I);
     title('透视矫正+中值滤波');
 end
 
+%% 裁剪圆点
 I_crop = I;
 
 I_gray = rgb2gray(I_crop);
@@ -164,24 +160,40 @@ if showProcess
     hold off;
 end
 
-x = inputPoints(1).BoundingBox(1) + inputPoints(1).BoundingBox(3)*CropOffset;
-y = inputPoints(1).BoundingBox(2) + inputPoints(1).BoundingBox(4)*CropOffset;
-width = inputPoints(3).BoundingBox(1) - inputPoints(3).BoundingBox(3)*(CropOffset-1) - x;
-height = inputPoints(3).BoundingBox(2) - inputPoints(3).BoundingBox(4)*(CropOffset-1) - y;
+LT = inputPoints(1);
+RB = inputPoints(3);
+
+x = LT.BoundingBox(1) + LT.BoundingBox(3)*CropOffset;
+y = LT.BoundingBox(2) + LT.BoundingBox(4)*CropOffset;
+width = RB.BoundingBox(1) - RB.BoundingBox(3)*(CropOffset-1) - x;
+height = RB.BoundingBox(2) - RB.BoundingBox(4)*(CropOffset-1) - y;
+
+%% 白平衡
+blackX = floor(LT.BoundingBox(1)) + 1;
+blackW = blackX + floor(LT.BoundingBox(3)/2);
+
+whiteX = ceil(x);
+whiteW = floor(width / 2);
+whiteY = floor(LT.BoundingBox(2)) + 1;
+
+white_patch = I_crop(whiteY:whiteY+1, whiteX:whiteX+whiteW, :);
+black_patch = I_crop(blackX:blackW, blackX:blackW, :);
+I_crop = whiteBalance(I_crop, white_patch, black_patch);
 
 I_crop = imcrop(I_crop, [x,y,width,height]);
 
 if showProcess
+    subplot(3, 4, 8)
     imshow(I_crop);
-    title('裁剪');
+    title('白平衡+裁剪');
 end
 
-%% STEP 5: 获取彩色连通区域 对4×4方格排序
+%% 中值滤波&高斯滤波&二值化&膨胀
 I_crop = cat(3, medfilt2(I_crop(:,:,1), hsize_2), medfilt2(I_crop(:,:,2), hsize_2), medfilt2(I_crop(:,:,3), hsize_2));
 I_crop = imgaussfilt(I_crop, sigma);
 
 if showProcess
-    subplot(3, 4, 8);
+    subplot(3, 4, 9);
     imshow(I_crop);
     title('中值&高斯滤波');
 end
@@ -193,7 +205,7 @@ bw = imbinarize(I_gray_adjusted, 'adaptive', 'Sensitivity', 0.75);
 bw = bwareaopen(bw, 30);
 
 if showProcess
-    subplot(3, 4, 9);
+    subplot(3, 4, 10);
     imshow(bw);
     title('二值化');
 end
@@ -209,12 +221,13 @@ dilatedI = imdilate(dilatedI, SE);
 dilatedI = imcomplement(dilatedI);
 
 if showProcess
-    subplot(3, 4, 10);
+    subplot(3, 4, 11);
     imshow(dilatedI);
     title('膨胀');
     hold on;
 end
 
+%% 获取彩色连通区域 对4x4方格排序
 color_stats = regionprops(dilatedI, 'Centroid', 'Area', 'Circularity');
 color_stats = color_stats([color_stats.Area] > 8);
 
@@ -263,13 +276,12 @@ for row = 1:ROW
     
     % 将排序后的行加入结果
     sorted_stats(startIdx : endIdx) = sortedRow';
-    % sorted_stats = [sorted_stats; sortedRow];
 end
 
-%% STEP 6: 统计颜色
+%% 统计颜色
 
 if showProcess
-    subplot(3, 4, 11);
+    subplot(3, 4, 12);
     imshow(I_crop);
     title('输出');
     hold on;
@@ -283,10 +295,23 @@ for k = 1:length(sorted_stats)
     x = round(centroid(1));
     y = round(centroid(2));
 
-    avgH = hsvImage(y, x, 1);
-    avgS = hsvImage(y, x, 2);
-    avgV = hsvImage(y, x, 3);
-
+    % 定义10x10区域边界 确保不超出图像范围
+    half_size = 0;%floor(min(width, height) / 8);  % 10x10 的一半是 5
+    x1 = max(1, x - half_size);
+    x2 = min(size(hsvImage, 2), x + half_size);
+    y1 = max(1, y - half_size);
+    y2 = min(size(hsvImage, 1), y + half_size);
+    
+    % 提取10x10区域
+    regionH = hsvImage(y1:y2, x1:x2, 1);
+    regionS = hsvImage(y1:y2, x1:x2, 2);
+    regionV = hsvImage(y1:y2, x1:x2, 3);
+    
+    % 计算各通道均值
+    avgH = mean(regionH(:));
+    avgS = mean(regionS(:));
+    avgV = mean(regionV(:));
+    
     if avgS < 0.2 && avgV > 0.8
         colorChar = 'W';  % white
     elseif ((avgH >= 0.95 || avgH < 0.10) && avgS > 0.25)
