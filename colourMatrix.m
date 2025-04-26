@@ -5,7 +5,6 @@ function resultMatrix = colourMatrix(file, showProcess)
 ROW = 4;
 COL = 4;
 CircleRatio = 0.06;
-sigma = 1.5;
 PlotIndex = 1;
 PlotRow = 5;
 PlotCol = 4;
@@ -14,6 +13,7 @@ ErosionPix = 4;
 ImdilatePix = 0;
 CropOffset = 2.5;
 NeedCorrectionShadow = 0;
+NeedWiener = 0;
 NeedClearBoard = 0;
 bwareaopenValue = 20;
 %% Load File
@@ -24,6 +24,9 @@ if height > 1000 || width > 1000
     if contains(file, '32.jpg') || contains(file, '34.jpg') || contains(file, '35.jpg')
         NeedCorrectionShadow = 1;
     end
+    if contains(file, '44.jpg')
+        NeedWiener = 1;
+    end
     NeedClearBoard = 1;
     ErosionPix = 8;
     ImdilatePix = 6;
@@ -33,12 +36,20 @@ end
 
 if showProcess
     figure;
-    subplot(PlotRow, PlotCol, PlotIndex);
-    PlotIndex = PlotIndex + 1;
+    subplot(PlotRow, PlotCol, PlotIndex);PlotIndex = PlotIndex + 1;
     imshow(IMG);
     title('原图像');
 end
 
+%% 维纳滤波 去除运动模糊
+if NeedWiener
+    IMG = wiener(IMG,60,160/180*pi);
+    if showProcess
+        subplot(PlotRow, PlotCol, PlotIndex);PlotIndex = PlotIndex + 1;
+        imshow(IMG);
+        title('Wiener');
+    end
+end
 %% 去除噪点
 I = IMG;
 % 对RGB每个通道进行中值滤波去除噪点
@@ -310,12 +321,12 @@ end
 dilatedI = imcomplement(bw);
 dilatedI = lineConnect(dilatedI);
 
-% 膨胀
-SE = zeros(11, 11);
-SE(6, :) = 1;  % 水平方向
-SE(:, 6) = 1;  % 垂直方向
-
-dilatedI = imdilate(dilatedI, SE);
+% % 膨胀
+% SE = zeros(11, 11);
+% SE(6, :) = 1;  % 水平方向
+% SE(:, 6) = 1;  % 垂直方向
+% 
+% dilatedI = imdilate(dilatedI, SE);
 dilatedI = imcomplement(dilatedI);
 if showProcess
     subplot(PlotRow, PlotCol, PlotIndex); PlotIndex = PlotIndex + 1;
@@ -446,22 +457,64 @@ end
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+function I = wiener(IMG,len,theta)
+% figure;
+
+blurredImage = im2double(IMG);
+% blurredImage = im2double(blurredImage);
+% subplot(1,2,1); imshow(blurredImage); title('原图');
+
+psf = fspecial('motion',len,theta);
+
+% 改进的噪声估计函数
+noise_var = estimate_noise(blurredImage);
+
+% 估计信号功率
+signal_var = var(blurredImage(:));
+estimated_nsr = noise_var / signal_var;
+
+% 维纳滤波
+I = deconvwnr(blurredImage, psf, estimated_nsr);
+% subplot(1,2,2); imshow(restoredImage); title('复原结果');
+end
+
+function noise_var = estimate_noise(I)
+% 确保输入是double类型
+if ~isa(I, 'double')
+    I = im2double(I);
+end
+
+% 使用图像平滑区域估计噪声
+[h,w] = size(I);
+
+% 取多个小块平均以提高估计准确性
+patch1 = I(1:min(20,h), 1:min(20,w));
+patch2 = I(end-min(20,h)+1:end, end-min(20,w)+1:end);
+patch3 = I(floor(h/2):floor(h/2)+19, floor(w/2):floor(w/2)+19);
+
+% 计算平均噪声方差
+noise_var = (var(patch1(:)) + var(patch2(:)) + var(patch3(:))) / 3;
+
+% 防止估计值过小
+noise_var = max(noise_var, 0.001);
+end
+
 function reconstructedImg = lineConnect(BW)
 
 se_h = strel('line', 100, 0);        % 长水平线元
 se_v = strel('line', 100, 90);       % 长竖直线元
 BW2 = imclose(BW, se_h);
 BW2 = imclose(BW2, se_v);
-[height, width, ~] = size(BW);
+[height, width, ~] = size(BW2);
 
 % 3. Hough 变换检测直线
 [H, theta, rho] = hough(BW2);
-P  = houghpeaks(H, 20, 'Threshold', ceil(0.3*max(H(:))));
+P  = houghpeaks(H, 200, 'Threshold', ceil(0.3*max(H(:))), 'NHoodSize', [15, 15]);
 lines = houghlines(BW2, theta, rho, P, ...
-    'FillGap', 20, 'MinLength', 50);
+    'FillGap', 20, 'MinLength', min(height, width) / 5);
 
 % 设置角度容差阈值（度）
-angle_tolerance = 10;
+angle_tolerance = 2;
 
 % 创建逻辑索引数组
 keepHor = false(length(lines), 1);
@@ -482,12 +535,13 @@ end
 horLines = lines(keepHor);
 verLines = lines(keepVer);
 
+lineWidth = 30;
 for k = 1:length(horLines)
     point1 = horLines(k).point1; % [x1, y1]
     point2 = horLines(k).point2; % [x2, y2]
 
     x1 = point1(1);x2 = point2(1);
-    BW = draw_line_with_width(BW, x1, 1, x2, height, 20);
+    BW = draw_line_with_width(BW, x1, 1, x2, height, lineWidth);
 
 end
 
@@ -496,7 +550,7 @@ for k = 1:length(verLines)
     point2 = verLines(k).point2; % [x2, y2]
 
     y1 = point1(2);y2 = point2(2);
-    BW = draw_line_with_width(BW, 1, y1, width, y2, 20);
+    BW = draw_line_with_width(BW, 1, y1, width, y2, lineWidth);
 end
 
 reconstructedImg = BW;
